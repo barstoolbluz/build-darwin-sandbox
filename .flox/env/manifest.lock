@@ -1,0 +1,81 @@
+{
+  "lockfile-version": 1,
+  "manifest": {
+    "schema-version": "1.11.0",
+    "install": {
+      "git": {
+        "pkg-path": "git"
+      }
+    },
+    "options": {
+      "systems": [
+        "aarch64-darwin",
+        "x86_64-darwin"
+      ]
+    }
+  },
+  "packages": [
+    {
+      "attr_path": "git",
+      "broken": false,
+      "derivation": "/nix/store/a8629rgwrbmn2xfdidnvgv8zbzz51q9c-git-2.53.0.drv",
+      "description": "Distributed version control system",
+      "install_id": "git",
+      "license": "GPL-2.0",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=4c1018dae018162ec878d42fec712642d214fdfa",
+      "name": "git-2.53.0",
+      "pname": "git",
+      "rev": "4c1018dae018162ec878d42fec712642d214fdfa",
+      "rev_count": 977467,
+      "rev_date": "2026-04-09T04:48:10Z",
+      "scrape_date": "2026-04-11T06:03:34.229812Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "2.53.0",
+      "outputs_to_install": [
+        "out",
+        "out"
+      ],
+      "outputs": {
+        "doc": "/nix/store/xp9w7bcl4c78268kn82qdayqglj0zdxa-git-2.53.0-doc",
+        "out": "/nix/store/6qbj40r0s289k5slmy8yna5x2hfz01wg-git-2.53.0"
+      },
+      "system": "aarch64-darwin",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "git",
+      "broken": false,
+      "derivation": "/nix/store/j1qp6x7kjzps81gq0jmisyvvlgp0vr4p-git-2.53.0.drv",
+      "description": "Distributed version control system",
+      "install_id": "git",
+      "license": "GPL-2.0",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=4c1018dae018162ec878d42fec712642d214fdfa",
+      "name": "git-2.53.0",
+      "pname": "git",
+      "rev": "4c1018dae018162ec878d42fec712642d214fdfa",
+      "rev_count": 977467,
+      "rev_date": "2026-04-09T04:48:10Z",
+      "scrape_date": "2026-04-11T07:05:09.296226Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "2.53.0",
+      "outputs_to_install": [
+        "out",
+        "out"
+      ],
+      "outputs": {
+        "doc": "/nix/store/yi2mi426la2x7rggv0a0ah11s2dangz4-git-2.53.0-doc",
+        "out": "/nix/store/2q2hzaclp1rsj65h21lng7wa26vawhnq-git-2.53.0"
+      },
+      "system": "x86_64-darwin",
+      "group": "toplevel",
+      "priority": 5
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+schema-version = "1.11.0"
+
+[install]
+# buildGoModule supplies its own Go toolchain from nixpkgs, so we do
+# not need `go` here for the build itself. `git` is convenient for
+# the author/dev workflow in the activated env.
+git.pkg-path = "git"
+
+[options]
+systems = ["aarch64-darwin", "x86_64-darwin"]
