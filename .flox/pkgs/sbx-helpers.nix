@@ -82,6 +82,13 @@ let
       policy_lines=(
         '(version 1)'
         '(allow default)'
+        # Deny access to the pasteboard Mach services. macOS registers
+        # two relevant names via /usr/libexec/pboard:
+        #   com.apple.pasteboard.1  (classic, used by pbcopy/pbpaste)
+        #   com.apple.coreservices.uauseractivitypasteboardclient.xpc
+        # We deny by prefix so future variants are also covered.
+        '(deny mach-lookup (global-name-prefix "com.apple.pasteboard"))'
+        '(deny mach-lookup (global-name-prefix "com.apple.coreservices.uauseractivitypasteboard"))'
         '(deny file-write*)'
         '(allow file-write* (subpath "/dev"))'
         '(deny network*)'
@@ -121,6 +128,9 @@ let
       policy_lines=(
         '(version 1)'
         '(allow default)'
+        # Deny pasteboard Mach services (see sbx-run for rationale).
+        '(deny mach-lookup (global-name-prefix "com.apple.pasteboard"))'
+        '(deny mach-lookup (global-name-prefix "com.apple.coreservices.uauseractivitypasteboard"))'
         '(deny file-write*)'
         '(allow file-write* (subpath "/dev"))'
         "(allow file-write* (subpath \"''${pwd_canon}\"))"
@@ -214,6 +224,17 @@ let
         --audit-log <p>  Write audit records to <p> instead of the
                          default location.
         --no-audit-log   Suppress audit logging for this invocation.
+        --dump-policy    Build and print the SBPL policy that WOULD be
+                         passed to sandbox-exec, then exit 0 without
+                         running anything. Dry-run / debugging aid.
+                         Compatible with every other flag. When used
+                         with --net-allow-host the proxy is NOT
+                         started; the policy shows a literal
+                         "localhost:<PROXY_PORT>" placeholder so you
+                         can still see its structure. No audit record
+                         is written. No command is required after --
+                         (you can invoke as "sbx-agent --dump-policy"
+                         with nothing else).
 
       Help:
         -h, --help       Show this help.
@@ -295,6 +316,7 @@ let
       max_files=""
       audit_log_path=""
       no_audit_log=0
+      dump_policy=0
 
       while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -334,6 +356,7 @@ let
           --audit-log)     [[ $# -ge 2 ]] || { echo "sbx-agent: --audit-log requires an argument" >&2; exit 2; }
                            audit_log_path="$2"; shift 2 ;;
           --no-audit-log)  no_audit_log=1; shift ;;
+          --dump-policy)   dump_policy=1; shift ;;
           -h|--help)       usage; exit 0 ;;
           --)              shift; break ;;
           -*)              echo "sbx-agent: unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -341,7 +364,7 @@ let
         esac
       done
 
-      if [[ $# -eq 0 ]]; then
+      if [[ $# -eq 0 && $dump_policy -eq 0 ]]; then
         echo "sbx-agent: no command specified (did you forget '--'?)" >&2
         usage >&2
         exit 2
@@ -439,42 +462,55 @@ let
           echo "sbx-agent: --net-allow-host implies a host-list policy via sbx-proxy; omit --net" >&2
           exit 2
         fi
-        if ! command -v sbx-proxy >/dev/null 2>&1; then
-          echo "sbx-agent: sbx-proxy not found on PATH; install the sbx-proxy package" >&2
-          exit 1
-        fi
 
-        proxy_port_file=$(mktemp -t sbx-proxy-port.XXXXXX)
-        proxy_log_file="''${FLOX_ENV_CACHE:-''${TMPDIR:-/tmp}}/sbx-proxy.log"
+        if [[ $dump_policy -eq 1 ]]; then
+          # Dump mode: don't start sbx-proxy. Use a literal
+          # "<PROXY_PORT>" placeholder so the dumped policy shows
+          # its structure without any side effect. The placeholder
+          # intentionally contains a '<' so that copy-pasting the
+          # dumped policy into sandbox-exec -p produces a clear
+          # parse error rather than silently using port 0 or a
+          # stale value.
+          net_mode="hosts"
+          net_hosts=("localhost:<PROXY_PORT>")
+        else
+          if ! command -v sbx-proxy >/dev/null 2>&1; then
+            echo "sbx-agent: sbx-proxy not found on PATH; install the sbx-proxy package" >&2
+            exit 1
+          fi
 
-        proxy_flags=(--listen "127.0.0.1:0" --port-file "$proxy_port_file" --log "$proxy_log_file" --ppid "$$")
-        for h in "''${net_allow_hosts[@]}"; do
-          proxy_flags+=(--allow-host "$h")
-        done
+          proxy_port_file=$(mktemp -t sbx-proxy-port.XXXXXX)
+          proxy_log_file="''${FLOX_ENV_CACHE:-''${TMPDIR:-/tmp}}/sbx-proxy.log"
 
-        sbx-proxy "''${proxy_flags[@]}" >/dev/null 2>&1 &
-        proxy_pid=$!
+          proxy_flags=(--listen "127.0.0.1:0" --port-file "$proxy_port_file" --log "$proxy_log_file" --ppid "$$")
+          for h in "''${net_allow_hosts[@]}"; do
+            proxy_flags+=(--allow-host "$h")
+          done
 
-        # Poll for the port file (proxy is ready when it writes it).
-        deadline=$(( SECONDS + 2 ))
-        while (( SECONDS < deadline )); do
-          [[ -s "$proxy_port_file" ]] && break
-          sleep 0.05
-        done
-        if [[ ! -s "$proxy_port_file" ]]; then
-          echo "sbx-agent: sbx-proxy did not start within 2s" >&2
-          kill "$proxy_pid" 2>/dev/null || true
+          sbx-proxy "''${proxy_flags[@]}" >/dev/null 2>&1 &
+          proxy_pid=$!
+
+          # Poll for the port file (proxy is ready when it writes it).
+          deadline=$(( SECONDS + 2 ))
+          while (( SECONDS < deadline )); do
+            [[ -s "$proxy_port_file" ]] && break
+            sleep 0.05
+          done
+          if [[ ! -s "$proxy_port_file" ]]; then
+            echo "sbx-agent: sbx-proxy did not start within 2s" >&2
+            kill "$proxy_pid" 2>/dev/null || true
+            rm -f "$proxy_port_file"
+            exit 1
+          fi
+          proxy_port=$(tr -d '[:space:]' < "$proxy_port_file")
           rm -f "$proxy_port_file"
-          exit 1
-        fi
-        proxy_port=$(tr -d '[:space:]' < "$proxy_port_file")
-        rm -f "$proxy_port_file"
 
-        # Override network policy: the sandbox only permits TCP to the
-        # proxy's port. Any direct network attempt from the agent is
-        # denied by the kernel.
-        net_mode="hosts"
-        net_hosts=("localhost:$proxy_port")
+          # Override network policy: the sandbox only permits TCP to the
+          # proxy's port. Any direct network attempt from the agent is
+          # denied by the kernel.
+          net_mode="hosts"
+          net_hosts=("localhost:$proxy_port")
+        fi
       fi
 
       # Build policy.
@@ -487,6 +523,13 @@ let
           '(import "system.sb")'
           '(deny default)'
           '(allow mach*)'
+          # Override (allow mach*) for the pasteboard Mach services so
+          # pbcopy/pbpaste cannot read or set the clipboard from inside
+          # the sandbox. macOS registers these via /usr/libexec/pboard
+          # under com.apple.pasteboard.* and the newer
+          # com.apple.coreservices.uauseractivitypasteboard* xpc name.
+          '(deny mach-lookup (global-name-prefix "com.apple.pasteboard"))'
+          '(deny mach-lookup (global-name-prefix "com.apple.coreservices.uauseractivitypasteboard"))'
           '(allow ipc*)'
           '(allow signal (target others))'
           '(allow process-fork)'
@@ -536,9 +579,13 @@ let
         done
       else
         # Permissive base: allow-default with writes stripped back.
+        # Also deny the pasteboard Mach services so pbcopy/pbpaste
+        # cannot read or set the clipboard from inside the sandbox.
         policy_lines=(
           '(version 1)'
           '(allow default)'
+          '(deny mach-lookup (global-name-prefix "com.apple.pasteboard"))'
+          '(deny mach-lookup (global-name-prefix "com.apple.coreservices.uauseractivitypasteboard"))'
           '(deny file-write*)'
           '(allow file-write* (subpath "/dev"))'
           "(allow file-write* (subpath \"''${pwd_canon}\"))"
@@ -581,6 +628,17 @@ let
       esac
 
       policy=$(printf '%s\n' "''${policy_lines[@]}")
+
+      # ---------------------------------------------------------------
+      # --dump-policy: print the built SBPL policy and exit. Pure
+      # dry-run — no env_args, no audit log, no ulimits, no proxy
+      # started (a placeholder was used above), no exec. The dump
+      # goes to stdout so it is pipe/grep/redirect-friendly.
+      # ---------------------------------------------------------------
+      if [[ $dump_policy -eq 1 ]]; then
+        printf '%s\n' "$policy"
+        exit 0
+      fi
 
       # ---------------------------------------------------------------
       # Build the env -i whitelist (skipped entirely if --passenv-all).
