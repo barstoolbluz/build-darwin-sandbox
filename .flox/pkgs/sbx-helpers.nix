@@ -321,7 +321,18 @@ let
         # making it to $((...)) where bash would silently emit a
         # wrapped int64 value.
         [[ "$val" =~ ^([0-9]{1,18})([KkMmGg]?)$ ]] || {
-          echo "sbx-agent: invalid size value: $val (expected NUMBER[KMG], max 18 digits)" >&2
+          # Distinguish two failure modes so the error message is
+          # targeted at the actual problem:
+          #   - shape is right but too many digits → "too long"
+          #   - shape is wrong (bad chars, empty, etc.)  → "invalid"
+          # Without this split, a short-but-malformed input like
+          # "0x10" would be rejected with a confusing "max 18 digits"
+          # message.
+          if [[ "$val" =~ ^[0-9]+[KkMmGg]?$ ]]; then
+            echo "sbx-agent: size value too long: $val (max 18 digits + optional K/M/G suffix)" >&2
+          else
+            echo "sbx-agent: invalid size value: $val (expected a decimal integer with optional K/M/G suffix, e.g. 10M, 2G)" >&2
+          fi
           exit 2
         }
         local num="''${BASH_REMATCH[1]}"
