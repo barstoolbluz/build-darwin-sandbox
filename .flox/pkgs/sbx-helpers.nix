@@ -319,6 +319,15 @@ let
           exit 2
         }
         local num="''${BASH_REMATCH[1]}"
+        # Force base-10 interpretation. Bash's $((expr)) treats any
+        # leading-zero literal as octal: 010 becomes 8, and 08/09
+        # raise an arithmetic error that exits the subshell with
+        # rc=1 under set -e. Both are silent traps for users typing
+        # SBX_LOG_MAX_SIZE=010M or --log-max-size 09M. Normalizing
+        # via 10#$num once, here, lets every downstream arithmetic
+        # branch see clean decimal and renders the value back
+        # without leading zeros for the no-unit case.
+        num=$((10#$num))
         local unit="''${BASH_REMATCH[2],,}"
         # Note: the no-unit pattern must be "" (double-quoted empty
         # string), not a single-quoted empty string. Nix indented
