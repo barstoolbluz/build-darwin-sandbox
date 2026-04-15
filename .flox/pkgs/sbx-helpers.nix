@@ -314,26 +314,44 @@ let
       # rotation". Non-matching input exits 2 with a clear error.
       parse_bytes() {
         local val="$1"
-        [[ "$val" =~ ^([0-9]+)([KkMmGg]?)$ ]] || {
-          echo "sbx-agent: invalid size value: $val (expected NUMBER[KMG])" >&2
+        # Digit-count cap {1,18}: max input is 10^18 - 1, comfortably
+        # below INT64_MAX (~9.22 * 10^18). Guarantees the subsequent
+        # 10#$num normalization cannot silently wrap. A 19-digit or
+        # 20-digit input is rejected at this regex step instead of
+        # making it to $((...)) where bash would silently emit a
+        # wrapped int64 value.
+        [[ "$val" =~ ^([0-9]{1,18})([KkMmGg]?)$ ]] || {
+          echo "sbx-agent: invalid size value: $val (expected NUMBER[KMG], max 18 digits)" >&2
           exit 2
         }
         local num="''${BASH_REMATCH[1]}"
-        # Force base-10 interpretation. Bash's $((expr)) treats any
-        # leading-zero literal as octal: 010 becomes 8, and 08/09
-        # raise an arithmetic error that exits the subshell with
-        # rc=1 under set -e. Both are silent traps for users typing
-        # SBX_LOG_MAX_SIZE=010M or --log-max-size 09M. Normalizing
-        # via 10#$num once, here, lets every downstream arithmetic
-        # branch see clean decimal and renders the value back
-        # without leading zeros for the no-unit case.
+        # Force base-10. Bash arithmetic treats 010 as octal 8 and
+        # 08/09 as invalid octal → rc=1 under set -e. The 10# prefix
+        # normalizes once and for all branches.
         num=$((10#$num))
         local unit="''${BASH_REMATCH[2],,}"
+        # Per-suffix overflow bound. max_safe is floor((2^63 - 1) /
+        # multiplier), so (num * multiplier) cannot exceed INT64_MAX
+        # for any num <= max_safe. Values derived and verified
+        # empirically at boundary. v1 of this fix used a result-
+        # based detector which failed on inputs like 999999999999999999M
+        # where the multiplication wraps back to a *positive* value
+        # larger than num — undetectable by a simple < comparison.
+        # Pre-multiplication bound check catches every overflow.
         # Note: the no-unit pattern must be "" (double-quoted empty
-        # string), not a single-quoted empty string. Nix indented
-        # strings treat two adjacent single quotes as a special
-        # escape sequence, so the build fails on that syntax even
-        # inside a comment.
+        # string); Nix indented strings treat two adjacent single
+        # quotes as an escape sequence even inside bash comments.
+        local max_safe
+        case "$unit" in
+          "")  max_safe=999999999999999999 ;;
+          k)   max_safe=9007199254740991 ;;
+          m)   max_safe=8796093022207 ;;
+          g)   max_safe=8589934591 ;;
+        esac
+        if [[ "$num" -gt "$max_safe" ]]; then
+          echo "sbx-agent: --log-max-size value too large: $val (max num for unit '$unit' is $max_safe)" >&2
+          exit 2
+        fi
         case "$unit" in
           "")  printf '%s\n' "$num" ;;
           k)   printf '%s\n' "$((num * 1024))" ;;
