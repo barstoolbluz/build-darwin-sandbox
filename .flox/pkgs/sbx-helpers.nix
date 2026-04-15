@@ -224,6 +224,13 @@ let
         --audit-log <p>  Write audit records to <p> instead of the
                          default location.
         --no-audit-log   Suppress audit logging for this invocation.
+        --log-max-size <n>
+                         Rotation cap for the agent audit log AND the
+                         sbx-proxy event log. Accepts raw bytes or a
+                         NUMBER with a K/M/G suffix (case-insensitive).
+                         Default: 10485760 (10 MiB). 0 disables rotation
+                         on both sides. Runtime manifest surfaces this
+                         as SBX_LOG_MAX_SIZE.
         --dump-policy    Build and print the SBPL policy that WOULD be
                          passed to sandbox-exec, then exit 0 without
                          running anything. Dry-run / debugging aid.
@@ -301,6 +308,31 @@ let
         esac
       }
 
+      # parse_bytes converts a size value with an optional case-insensitive
+      # K/M/G suffix into raw bytes. Used by --log-max-size so users can
+      # write "50M" instead of "52428800". 0 is legal and means "disable
+      # rotation". Non-matching input exits 2 with a clear error.
+      parse_bytes() {
+        local val="$1"
+        [[ "$val" =~ ^([0-9]+)([KkMmGg]?)$ ]] || {
+          echo "sbx-agent: invalid size value: $val (expected NUMBER[KMG])" >&2
+          exit 2
+        }
+        local num="''${BASH_REMATCH[1]}"
+        local unit="''${BASH_REMATCH[2],,}"
+        # Note: the no-unit pattern must be "" (double-quoted empty
+        # string), not a single-quoted empty string. Nix indented
+        # strings treat two adjacent single quotes as a special
+        # escape sequence, so the build fails on that syntax even
+        # inside a comment.
+        case "$unit" in
+          "")  printf '%s\n' "$num" ;;
+          k)   printf '%s\n' "$((num * 1024))" ;;
+          m)   printf '%s\n' "$((num * 1024 * 1024))" ;;
+          g)   printf '%s\n' "$((num * 1024 * 1024 * 1024))" ;;
+        esac
+      }
+
       net_mode="block"
       net_mode_user_set=0
       net_mode_orig=""
@@ -318,6 +350,11 @@ let
       audit_log_path=""
       no_audit_log=0
       dump_policy=0
+      # Default rotation cap for audit log and proxy log: 10 MiB. Override
+      # via --log-max-size (accepted formats: bytes, or N with K/M/G suffix).
+      # 0 disables rotation on both sides. The runtime manifest surfaces
+      # this as SBX_LOG_MAX_SIZE via the _sbx_agent_args helper.
+      log_max_size="10485760"
 
       while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -357,6 +394,10 @@ let
           --audit-log)     [[ $# -ge 2 ]] || { echo "sbx-agent: --audit-log requires an argument" >&2; exit 2; }
                            audit_log_path="$2"; shift 2 ;;
           --no-audit-log)  no_audit_log=1; shift ;;
+          --log-max-size=*)
+                           log_max_size=$(parse_bytes "''${1#--log-max-size=}"); shift ;;
+          --log-max-size)  [[ $# -ge 2 ]] || { echo "sbx-agent: --log-max-size requires an argument" >&2; exit 2; }
+                           log_max_size=$(parse_bytes "$2"); shift 2 ;;
           --dump-policy)   dump_policy=1; shift ;;
           -h|--help)       usage; exit 0 ;;
           --)              shift; break ;;
@@ -484,7 +525,7 @@ let
           proxy_port_file=$(mktemp -t sbx-proxy-port.XXXXXX)
           proxy_log_file="''${FLOX_ENV_CACHE:-''${TMPDIR:-/tmp}}/sbx-proxy.log"
 
-          proxy_flags=(--listen "127.0.0.1:0" --port-file "$proxy_port_file" --log "$proxy_log_file" --ppid "$$")
+          proxy_flags=(--listen "127.0.0.1:0" --port-file "$proxy_port_file" --log "$proxy_log_file" --log-max-size "$log_max_size" --ppid "$$")
           for h in "''${net_allow_hosts[@]}"; do
             proxy_flags+=(--allow-host "$h")
           done
@@ -705,16 +746,19 @@ let
         log_dir=$(dirname "$log_file")
         [[ -d "$log_dir" ]] || mkdir -p "$log_dir" 2>/dev/null || return 0
 
-        # Crude log rotation: if the existing log is >10 MB, rename it
-        # to .log.1 before appending. Best-effort — concurrent writers
-        # can race on the rename, with at most a few lines lost on the
-        # losing side. sbx-agent's runtimeInputs is GNU coreutils, so
-        # `stat -c%s` is the correct size flag; the fallback to 0
+        # Crude log rotation: if the existing log exceeds $log_max_size,
+        # rename it to .log.1 before appending. Best-effort — concurrent
+        # writers can race on the rename, with at most a few lines lost
+        # on the losing side. sbx-agent's runtimeInputs is GNU coreutils,
+        # so `stat -c%s` is the correct size flag; the fallback to 0
         # handles the "no file yet" case without a separate check.
-        local log_size
-        log_size=$(stat -c%s "$log_file" 2>/dev/null || echo 0)
-        if [[ "$log_size" -gt 10485760 ]]; then
-          mv -f "$log_file" "$log_file.1" 2>/dev/null || true
+        # log_max_size=0 disables rotation entirely.
+        if [[ "$log_max_size" -gt 0 ]]; then
+          local log_size
+          log_size=$(stat -c%s "$log_file" 2>/dev/null || echo 0)
+          if [[ "$log_size" -gt "$log_max_size" ]]; then
+            mv -f "$log_file" "$log_file.1" 2>/dev/null || true
+          fi
         fi
 
         local ts
