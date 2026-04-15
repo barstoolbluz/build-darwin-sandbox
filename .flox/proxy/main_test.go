@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"flag"
 	"io"
 	"log"
 	"net"
@@ -232,6 +233,38 @@ func TestRotatingWriterDisabledWhenMaxSizeZero(t *testing.T) {
 	}
 	if _, err := os.Stat(logPath + ".1"); !os.IsNotExist(err) {
 		t.Fatalf("rotation occurred with maxSize=0: err=%v", err)
+	}
+}
+
+// Go's flag.Int64 uses strconv.ParseInt(s, 0, 64), which auto-detects
+// base from the string prefix: "010" → octal 8, "0x10" → hex 16,
+// "0900" → error ("9" invalid in octal). registerLogMaxSize switches
+// to flag.Func with explicit base-10, sidestepping all three traps.
+// These two tests exercise the exact closure main() registers, via
+// the extracted helper.
+func TestLogMaxSizeFlagParsesLeadingZeroAsDecimal(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.SetOutput(&bytes.Buffer{})
+	var lms int64 = 10 * 1024 * 1024
+	registerLogMaxSize(fs, &lms)
+	if err := fs.Parse([]string{"-log-max-size=010"}); err != nil {
+		t.Fatalf("-log-max-size=010 rejected: %v", err)
+	}
+	if lms != 10 {
+		t.Fatalf("-log-max-size=010: got %d, want 10 (under base-0 auto-detect this would be octal 8)", lms)
+	}
+}
+
+func TestLogMaxSizeFlagRejectsHexPrefix(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.SetOutput(&bytes.Buffer{})
+	var lms int64 = 10 * 1024 * 1024
+	registerLogMaxSize(fs, &lms)
+	if err := fs.Parse([]string{"-log-max-size=0x10"}); err == nil {
+		t.Fatalf("-log-max-size=0x10 accepted under base-10: want error, got lms=%d", lms)
+	}
+	if lms != 10*1024*1024 {
+		t.Fatalf("-log-max-size=0x10 partially applied: lms=%d (should be untouched default)", lms)
 	}
 }
 

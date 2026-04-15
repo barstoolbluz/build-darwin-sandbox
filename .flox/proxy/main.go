@@ -916,13 +916,37 @@ func validateTLSSNIPolicy(v string) (tlsSNIPolicy, error) {
 	}
 }
 
+// registerLogMaxSize wires --log-max-size onto fs with explicit
+// base-10 parsing. Go's flag.Int64 uses strconv.ParseInt(s, 0, 64),
+// which auto-detects 0-prefixed literals as octal: "010" → 8,
+// "0x10" → 16, "0900" → error ("9" invalid in octal). This trap
+// mirrors the bash parse_bytes octal trap on the agent side and
+// would let users accidentally get far smaller rotation caps than
+// they typed. Using flag.Func with strconv.ParseInt(s, 10, 64) is
+// a one-function fix: leading zeros are silently ignored, decimal
+// only, explicit errors on malformed input.
+//
+// Extracted as a helper so Go tests can exercise the exact same
+// closure that main() registers, not a reconstructed one.
+func registerLogMaxSize(fs *flag.FlagSet, dst *int64) {
+	fs.Func("log-max-size", "rotate --log to <path>.1 when it would exceed this many bytes (0 disables; default 10485760 = 10 MiB; decimal only)", func(s string) error {
+		v, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			return fmt.Errorf("invalid integer: %w", err)
+		}
+		*dst = v
+		return nil
+	})
+}
+
 func main() {
 	var allowHosts stringSlice
 	listen := flag.String("listen", "127.0.0.1:0", "loopback listen address (host:port)")
 	flag.Var(&allowHosts, "allow-host", "allowed host[:port], repeatable; wildcards like *.example.com supported")
 	portFile := flag.String("port-file", "", "write bound port to this file (default: print to stdout)")
 	logPath := flag.String("log", "", "append structured events to this file (default: stderr)")
-	logMaxSize := flag.Int64("log-max-size", 10*1024*1024, "rotate --log to <path>.1 when it would exceed this many bytes (0 disables)")
+	var logMaxSize int64 = 10 * 1024 * 1024
+	registerLogMaxSize(flag.CommandLine, &logMaxSize)
 	ppid := flag.Int("ppid", 0, "shut down when this parent PID is no longer alive (0=disabled)")
 	dialTO := flag.Duration("dial-timeout", 10*time.Second, "upstream dial timeout")
 	tunnelIdleTO := flag.Duration("tunnel-idle-timeout", 2*time.Minute, "per-direction idle timeout once a tunnel is established (0=disabled)")
@@ -951,7 +975,7 @@ func main() {
 	}
 	var logOut io.Writer = os.Stderr
 	if *logPath != "" {
-		rw, err := newRotatingWriter(*logPath, *logMaxSize)
+		rw, err := newRotatingWriter(*logPath, logMaxSize)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "sbx-proxy: open log %q: %v\n", *logPath, err)
 			os.Exit(1)
@@ -980,7 +1004,7 @@ func main() {
 	} else {
 		fmt.Println(port)
 	}
-	lg.eventf("event=start port=%d allowlist=%s max_conns=%d idle_timeout=%q max_lifetime=%q tls_sni_policy=%q tls_sni_timeout=%q log_max_size=%d", port, a.summary(), *maxConns, tunnelIdleTO.String(), tunnelMaxLifetime.String(), sniPolicy, tlsSniffTimeout.String(), *logMaxSize)
+	lg.eventf("event=start port=%d allowlist=%s max_conns=%d idle_timeout=%q max_lifetime=%q tls_sni_policy=%q tls_sni_timeout=%q log_max_size=%d", port, a.summary(), *maxConns, tunnelIdleTO.String(), tunnelMaxLifetime.String(), sniPolicy, tlsSniffTimeout.String(), logMaxSize)
 	tracker := newConnTracker()
 	sem := make(chan struct{}, *maxConns)
 	stopParentWatch := make(chan struct{})
