@@ -303,6 +303,7 @@ let
 
       net_mode="block"
       net_mode_user_set=0
+      net_mode_orig=""
       net_allow_hosts=()
       extra_writes=()
       extra_reads=()
@@ -445,6 +446,7 @@ let
             echo "sbx-agent: --net had no valid entries" >&2
             exit 2
           fi
+          net_mode_orig="$net_mode"
           net_mode="hosts"
           ;;
       esac
@@ -703,6 +705,18 @@ let
         log_dir=$(dirname "$log_file")
         [[ -d "$log_dir" ]] || mkdir -p "$log_dir" 2>/dev/null || return 0
 
+        # Crude log rotation: if the existing log is >10 MB, rename it
+        # to .log.1 before appending. Best-effort — concurrent writers
+        # can race on the rename, with at most a few lines lost on the
+        # losing side. sbx-agent's runtimeInputs is GNU coreutils, so
+        # `stat -c%s` is the correct size flag; the fallback to 0
+        # handles the "no file yet" case without a separate check.
+        local log_size
+        log_size=$(stat -c%s "$log_file" 2>/dev/null || echo 0)
+        if [[ "$log_size" -gt 10485760 ]]; then
+          mv -f "$log_file" "$log_file.1" 2>/dev/null || true
+        fi
+
         local ts
         ts=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 
@@ -723,8 +737,10 @@ let
         local argv_str="$*"
 
         # Single printf → atomic append for writes <PIPE_BUF (4KB).
-        printf 'ts=%s pid=%d cwd="%s" strict=%d net=%s proxy=%s proxy_hosts=%s timeout=%s writes=%s reads=%s passenv=%s argv="%s"\n' \
-          "$ts" "$$" "$PWD" "$strict_reads" "$net_mode" \
+        # net_orig is empty unless --net was given a host list that
+        # got rewritten to "hosts"; empty is a valid structured value.
+        printf 'ts=%s pid=%d cwd="%s" strict=%d net=%s net_orig="%s" proxy=%s proxy_hosts=%s timeout=%s writes=%s reads=%s passenv=%s argv="%s"\n' \
+          "$ts" "$$" "$PWD" "$strict_reads" "$net_mode" "$net_mode_orig" \
           "$proxy_state" "$proxy_hosts_str" \
           "''${wall_timeout:-none}" \
           "$writes_str" "$reads_str" "$passenv_str" \
