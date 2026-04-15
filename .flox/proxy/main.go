@@ -131,6 +131,63 @@ func (e *eventLogger) eventf(format string, args ...any) {
 	e.lg.Printf("ts=%s "+format, append([]any{ts}, args...)...)
 }
 
+// rotatingWriter is a size-capped append writer. When the next Write
+// would push the underlying file past maxSize, it closes the current
+// file, renames it to "<path>.1" (clobbering any prior .1), opens a
+// fresh file, and then writes. Best-effort: rename and close errors
+// on the rotation path are swallowed, because log rotation must never
+// lose the in-flight log line on an unrelated FS hiccup. maxSize <= 0
+// disables rotation entirely.
+type rotatingWriter struct {
+	mu      sync.Mutex
+	path    string
+	maxSize int64
+	f       *os.File
+	size    int64
+}
+
+func newRotatingWriter(path string, maxSize int64) (*rotatingWriter, error) {
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return &rotatingWriter{path: path, maxSize: maxSize, f: f, size: info.Size()}, nil
+}
+
+func (r *rotatingWriter) Write(p []byte) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.maxSize > 0 && r.size+int64(len(p)) > r.maxSize {
+		_ = r.f.Close()
+		_ = os.Rename(r.path, r.path+".1")
+		nf, err := os.OpenFile(r.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		if err != nil {
+			return 0, err
+		}
+		r.f = nf
+		r.size = 0
+	}
+	n, err := r.f.Write(p)
+	r.size += int64(n)
+	return n, err
+}
+
+func (r *rotatingWriter) Close() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.f == nil {
+		return nil
+	}
+	err := r.f.Close()
+	r.f = nil
+	return err
+}
+
 type connTracker struct {
 	mu    sync.Mutex
 	conns map[net.Conn]struct{}
@@ -847,6 +904,7 @@ func main() {
 	flag.Var(&allowHosts, "allow-host", "allowed host[:port], repeatable; wildcards like *.example.com supported")
 	portFile := flag.String("port-file", "", "write bound port to this file (default: print to stdout)")
 	logPath := flag.String("log", "", "append structured events to this file (default: stderr)")
+	logMaxSize := flag.Int64("log-max-size", 10*1024*1024, "rotate --log to <path>.1 when it would exceed this many bytes (0 disables)")
 	ppid := flag.Int("ppid", 0, "shut down when this parent PID is no longer alive (0=disabled)")
 	dialTO := flag.Duration("dial-timeout", 10*time.Second, "upstream dial timeout")
 	tunnelIdleTO := flag.Duration("tunnel-idle-timeout", 2*time.Minute, "per-direction idle timeout once a tunnel is established (0=disabled)")
@@ -875,13 +933,13 @@ func main() {
 	}
 	var logOut io.Writer = os.Stderr
 	if *logPath != "" {
-		f, err := os.OpenFile(*logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		rw, err := newRotatingWriter(*logPath, *logMaxSize)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "sbx-proxy: open log %q: %v\n", *logPath, err)
 			os.Exit(1)
 		}
-		defer f.Close()
-		logOut = f
+		defer rw.Close()
+		logOut = rw
 	}
 	lg := &eventLogger{lg: log.New(logOut, "", 0)}
 	a, err := newAllowlist(allowHosts)

@@ -175,6 +175,101 @@ func TestWritePortFileAtomicCreatesParentDir(t *testing.T) {
 	}
 }
 
+func TestRotatingWriterRotatesOnThreshold(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := filepath.Join(tmpDir, "events.log")
+	rw, err := newRotatingWriter(logPath, 10)
+	if err != nil {
+		t.Fatalf("newRotatingWriter: %v", err)
+	}
+	t.Cleanup(func() { _ = rw.Close() })
+
+	// First write fits under the 10-byte cap — no rotation.
+	if _, err := rw.Write([]byte("first\n")); err != nil {
+		t.Fatalf("first Write: %v", err)
+	}
+	if _, err := os.Stat(logPath + ".1"); !os.IsNotExist(err) {
+		t.Fatalf("unexpected .1 after first write: err=%v", err)
+	}
+
+	// Second write would push total to 12 bytes, crossing the cap.
+	// The writer must rotate before writing, so .1 ends up holding
+	// the first line byte-for-byte and .log holds only the second.
+	if _, err := rw.Write([]byte("second\n")); err != nil {
+		t.Fatalf("second Write: %v", err)
+	}
+	rotated, err := os.ReadFile(logPath + ".1")
+	if err != nil {
+		t.Fatalf("ReadFile .1: %v", err)
+	}
+	if string(rotated) != "first\n" {
+		t.Fatalf("rotated file contents = %q, want %q", string(rotated), "first\n")
+	}
+	current, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile current: %v", err)
+	}
+	if string(current) != "second\n" {
+		t.Fatalf("current file contents = %q, want %q", string(current), "second\n")
+	}
+}
+
+func TestRotatingWriterDisabledWhenMaxSizeZero(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := filepath.Join(tmpDir, "events.log")
+	rw, err := newRotatingWriter(logPath, 0)
+	if err != nil {
+		t.Fatalf("newRotatingWriter: %v", err)
+	}
+	t.Cleanup(func() { _ = rw.Close() })
+
+	// With maxSize=0, writing well beyond any plausible threshold
+	// must never rotate. Verify by writing 1 MiB and asserting .1
+	// does not exist.
+	payload := bytes.Repeat([]byte("x"), 1<<20)
+	if _, err := rw.Write(payload); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if _, err := os.Stat(logPath + ".1"); !os.IsNotExist(err) {
+		t.Fatalf("rotation occurred with maxSize=0: err=%v", err)
+	}
+}
+
+func TestRotatingWriterSeedsSizeFromExistingFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := filepath.Join(tmpDir, "events.log")
+	// Pre-populate: 8 bytes.
+	if err := os.WriteFile(logPath, []byte("preexist"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	rw, err := newRotatingWriter(logPath, 10)
+	if err != nil {
+		t.Fatalf("newRotatingWriter: %v", err)
+	}
+	t.Cleanup(func() { _ = rw.Close() })
+
+	// Adding "hi\n" (3 bytes) would total 11, crossing the 10-byte
+	// cap. newRotatingWriter must seed size from the existing file
+	// so that rotation fires on this very first write.
+	if _, err := rw.Write([]byte("hi\n")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	rotated, err := os.ReadFile(logPath + ".1")
+	if err != nil {
+		t.Fatalf("ReadFile .1: %v", err)
+	}
+	if string(rotated) != "preexist" {
+		t.Fatalf("rotated = %q, want %q", string(rotated), "preexist")
+	}
+	current, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile current: %v", err)
+	}
+	if string(current) != "hi\n" {
+		t.Fatalf("current = %q, want %q", string(current), "hi\n")
+	}
+}
+
 func TestHandleConnectTunnelsPayloadAndUsesClean200(t *testing.T) {
 	a, err := newAllowlist([]string{"api.example.com:443"})
 	if err != nil {
