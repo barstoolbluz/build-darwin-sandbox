@@ -980,7 +980,7 @@ func main() {
 	} else {
 		fmt.Println(port)
 	}
-	lg.eventf("event=start port=%d allowlist=%s max_conns=%d idle_timeout=%q max_lifetime=%q tls_sni_policy=%q tls_sni_timeout=%q", port, a.summary(), *maxConns, tunnelIdleTO.String(), tunnelMaxLifetime.String(), sniPolicy, tlsSniffTimeout.String())
+	lg.eventf("event=start port=%d allowlist=%s max_conns=%d idle_timeout=%q max_lifetime=%q tls_sni_policy=%q tls_sni_timeout=%q log_max_size=%d", port, a.summary(), *maxConns, tunnelIdleTO.String(), tunnelMaxLifetime.String(), sniPolicy, tlsSniffTimeout.String(), *logMaxSize)
 	tracker := newConnTracker()
 	sem := make(chan struct{}, *maxConns)
 	stopParentWatch := make(chan struct{})
