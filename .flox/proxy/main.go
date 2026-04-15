@@ -163,8 +163,26 @@ func (r *rotatingWriter) Write(p []byte) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.maxSize > 0 && r.size+int64(len(p)) > r.maxSize {
+		// Multiple sbx-proxy processes can share one log file (each
+		// sbx-agent invocation auto-starts its own proxy, and they
+		// all default to $FLOX_ENV_CACHE/sbx-proxy.log). If a sibling
+		// proxy already rotated, our r.f is still bound to the old
+		// inode — now living at r.path+".1" — while r.path itself
+		// points at the sibling's fresh file. Renaming r.path in
+		// that state would clobber the sibling's .log.1 and destroy
+		// an entire rotation cycle of history.
+		//
+		// Guard: compare the inode our fd is bound to against the
+		// inode currently at r.path, and only rename when we are
+		// still the canonical writer of the current .log. Otherwise
+		// skip the rename, reopen the path to rejoin whatever the
+		// fresh file is, and reset our byte counter.
+		ourInfo, _ := r.f.Stat()
+		pathInfo, perr := os.Stat(r.path)
 		_ = r.f.Close()
-		_ = os.Rename(r.path, r.path+".1")
+		if perr == nil && ourInfo != nil && os.SameFile(ourInfo, pathInfo) {
+			_ = os.Rename(r.path, r.path+".1")
+		}
 		nf, err := os.OpenFile(r.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 		if err != nil {
 			return 0, err

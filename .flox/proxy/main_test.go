@@ -270,6 +270,105 @@ func TestRotatingWriterSeedsSizeFromExistingFile(t *testing.T) {
 	}
 }
 
+// Two sbx-proxy processes can share $FLOX_ENV_CACHE/sbx-proxy.log
+// when the user runs two jails concurrently in the same flox env.
+// Before the os.SameFile guard, whichever proxy rotated second would
+// clobber the first proxy's .log.1 — destroying an entire rotation
+// cycle of audit history. The guard compares the fd's inode against
+// the path's inode at rotation time and skips the rename when they
+// differ. This test drives the two-writer, two-rotation sequence and
+// asserts that the first rotation's .log.1 survives intact.
+func TestRotatingWriterSkipsRenameWhenSiblingRotated(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := filepath.Join(tmpDir, "events.log")
+
+	// Both writers open the same path. Because O_APPEND|O_CREATE is
+	// safe for shared append, they end up bound to the same inode
+	// (the first constructor creates the file; the second joins it).
+	rw1, err := newRotatingWriter(logPath, 10)
+	if err != nil {
+		t.Fatalf("rw1: %v", err)
+	}
+	t.Cleanup(func() { _ = rw1.Close() })
+
+	rw2, err := newRotatingWriter(logPath, 10)
+	if err != nil {
+		t.Fatalf("rw2: %v", err)
+	}
+	t.Cleanup(func() { _ = rw2.Close() })
+
+	// rw1 fills its budget and rotates. The file before rotation is
+	// 8 bytes ("first-a\n"); the 9-byte second write crosses the
+	// 10-byte cap, so rw1 closes its fd, renames .log -> .log.1
+	// (carrying "first-a\n"), opens a fresh .log, and writes
+	// "second-a\n" into it.
+	if _, err := rw1.Write([]byte("first-a\n")); err != nil {
+		t.Fatalf("rw1.Write 1: %v", err)
+	}
+	if _, err := rw1.Write([]byte("second-a\n")); err != nil {
+		t.Fatalf("rw1.Write 2: %v", err)
+	}
+	got, err := os.ReadFile(logPath + ".1")
+	if err != nil {
+		t.Fatalf("ReadFile .1 after rw1 rotation: %v", err)
+	}
+	if string(got) != "first-a\n" {
+		t.Fatalf("after rw1 rotation, .log.1 = %q, want %q", string(got), "first-a\n")
+	}
+
+	// rw2's fd is still bound to the old inode (now at .log.1).
+	// rw2's first 8-byte write goes THROUGH that fd into the old
+	// inode, so .log.1 grows to "first-a\nfirst-b\n". This is
+	// expected: rw2 hasn't noticed the rotation yet, and appending
+	// into a rotated file is harmless — the data is still in .log.1
+	// where a future reader can find it.
+	if _, err := rw2.Write([]byte("first-b\n")); err != nil {
+		t.Fatalf("rw2.Write 1: %v", err)
+	}
+	got, err = os.ReadFile(logPath + ".1")
+	if err != nil {
+		t.Fatalf("ReadFile .1 after rw2 pre-rotation write: %v", err)
+	}
+	if string(got) != "first-a\nfirst-b\n" {
+		t.Fatalf("after rw2 pre-rotation write, .log.1 = %q, want %q", string(got), "first-a\nfirst-b\n")
+	}
+
+	// rw2's second 9-byte write would push its internal counter to
+	// 17, crossing the 10-byte cap. This triggers rotation. Without
+	// the os.SameFile guard, rw2 would blindly rename .log -> .log.1
+	// and clobber "first-a\nfirst-b\n" with whatever is currently at
+	// .log (rw1's "second-a\n"). WITH the guard, rw2 notices its fd
+	// points at a different inode than the path, skips the rename,
+	// reopens .log (rejoining rw1's current file), resets its
+	// counter, and writes "second-b\n" into the shared .log.
+	if _, err := rw2.Write([]byte("second-b\n")); err != nil {
+		t.Fatalf("rw2.Write 2: %v", err)
+	}
+
+	// Key assertion: .log.1 must still hold the full pre-rotation
+	// history ("first-a\nfirst-b\n"). If rw2 clobbered it, this
+	// readback returns "second-a\n" or similar and the test fails
+	// loudly.
+	got, err = os.ReadFile(logPath + ".1")
+	if err != nil {
+		t.Fatalf("ReadFile .1 after rw2 rotation codepath: %v", err)
+	}
+	if string(got) != "first-a\nfirst-b\n" {
+		t.Fatalf("rw2 clobbered sibling rotation: .log.1 = %q, want %q", string(got), "first-a\nfirst-b\n")
+	}
+
+	// Belt-and-suspenders: .log should now hold both proxies'
+	// post-rotation writes. rw1 put "second-a\n" there at its
+	// rotation, and rw2's reopen+write appended "second-b\n".
+	got, err = os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile .log after rw2 rotation codepath: %v", err)
+	}
+	if string(got) != "second-a\nsecond-b\n" {
+		t.Fatalf(".log = %q, want %q", string(got), "second-a\nsecond-b\n")
+	}
+}
+
 func TestHandleConnectTunnelsPayloadAndUsesClean200(t *testing.T) {
 	a, err := newAllowlist([]string{"api.example.com:443"})
 	if err != nil {
